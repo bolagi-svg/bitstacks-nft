@@ -265,3 +265,114 @@
     (ok true)
   )
 )
+
+;; STAKING & YIELD SYSTEM
+
+;; Stake NFT for Yield Generation
+(define-public (stake-nft (token-id uint))
+  (let ((token (unwrap! (get-token-info token-id) err-invalid-token)))
+    ;; Validate staking conditions
+    (asserts! (is-eq tx-sender (get owner token)) err-not-token-owner)
+    (asserts! (not (get is-staked token)) err-already-staked)
+    ;; Update token staking status
+    (map-set tokens { token-id: token-id }
+      (merge token {
+        is-staked: true,
+        stake-timestamp: stacks-block-height,
+      })
+    )
+    ;; Initialize rewards tracking
+    (map-set staking-rewards { token-id: token-id } {
+      accumulated-yield: u0,
+      last-claim: stacks-block-height,
+    })
+    ;; Update global staking counter
+    (var-set total-staked (+ (var-get total-staked) u1))
+    (ok true)
+  )
+)
+
+;; Unstake NFT and Claim Final Rewards
+(define-public (unstake-nft (token-id uint))
+  (let (
+      (token (unwrap! (get-token-info token-id) err-invalid-token))
+      (rewards (unwrap! (get-staking-rewards token-id) err-not-staked))
+    )
+    ;; Validate unstaking conditions
+    (asserts! (is-eq tx-sender (get owner token)) err-not-token-owner)
+    (asserts! (get is-staked token) err-not-staked)
+    ;; Claim final rewards
+    (try! (claim-staking-rewards token-id))
+    ;; Update token staking status
+    (map-set tokens { token-id: token-id }
+      (merge token {
+        is-staked: false,
+        stake-timestamp: u0,
+      })
+    )
+    ;; Update global staking counter
+    (var-set total-staked (- (var-get total-staked) u1))
+    (ok true)
+  )
+)
+
+;; READ-ONLY QUERY FUNCTIONS
+
+;; Get Token Information
+(define-read-only (get-token-info (token-id uint))
+  (map-get? tokens { token-id: token-id })
+)
+
+;; Get Marketplace Listing
+(define-read-only (get-listing (token-id uint))
+  (map-get? token-listings { token-id: token-id })
+)
+
+;; Get Fractional Ownership Shares
+(define-read-only (get-fractional-shares
+    (token-id uint)
+    (owner principal)
+  )
+  (map-get? fractional-ownership {
+    token-id: token-id,
+    owner: owner,
+  })
+)
+
+;; Get Staking Rewards Information
+(define-read-only (get-staking-rewards (token-id uint))
+  (map-get? staking-rewards { token-id: token-id })
+)
+
+;; Calculate Current Accumulated Rewards
+(define-read-only (calculate-rewards (token-id uint))
+  (let (
+      (token (unwrap! (get-token-info token-id) err-invalid-token))
+      (rewards (unwrap! (get-staking-rewards token-id) err-not-staked))
+      (blocks-staked (- stacks-block-height (get stake-timestamp token)))
+      (yield-per-block (/ (var-get yield-rate) u52560)) ;; Approximate blocks per year
+      (new-rewards (* blocks-staked yield-per-block))
+    )
+    (ok (+ (get accumulated-yield rewards) new-rewards))
+  )
+)
+
+;; INTERNAL REWARD DISTRIBUTION
+
+;; Internal Rewards Claiming Function
+(define-private (claim-staking-rewards (token-id uint))
+  (let (
+      (rewards (unwrap! (calculate-rewards token-id) err-not-staked))
+      (token (unwrap! (get-token-info token-id) err-invalid-token))
+    )
+    ;; Validate staking status
+    (asserts! (get is-staked token) err-not-staked)
+    ;; Reset rewards tracking
+    (map-set staking-rewards { token-id: token-id } {
+      accumulated-yield: u0,
+      last-claim: stacks-block-height,
+    })
+    ;; Distribute rewards to token owner
+    (as-contract (stx-transfer? rewards (as-contract tx-sender) (get owner token)))
+  )
+)
